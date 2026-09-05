@@ -5,6 +5,10 @@ package gpuallocator
 import (
 	"sort"
 	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/NVIDIA/go-gpuallocator/internal/links"
 )
 
 func sortGPUSetOfSets(sos [][]*Device) {
@@ -509,4 +513,45 @@ func TestBestEffortDGX1VoltaGPUAllocEight(t *testing.T) {
 	}
 
 	RunAllocTests(t, allocator, tests)
+}
+
+func TestBestEffortAllocateExcludesPadding(t *testing.T) {
+	node := TestNode{NewTestGPU(0), NewTestGPU(1), NewTestGPU(2), NewTestGPU(3), NewTestGPU(4)}
+	// The NVLink pair scores higher than the PCIe-connected triple. Keeping
+	// each group intact produces the highest total partition score.
+	node.AddLink(0, 1, links.TwoNVLINKLinks)
+	node.AddLink(1, 0, links.TwoNVLINKLinks)
+	for i := range node {
+		for j := range node {
+			if i == j {
+				continue
+			}
+			linkType := links.P2PLinkCrossCPU
+			if (i < 2 && j < 2) || (i >= 2 && j >= 2) {
+				linkType = links.P2PLinkSingleSwitch
+			}
+			node.AddLink(i, j, linkType)
+		}
+	}
+	devices := node.Devices()
+	t.Run("policy", func(t *testing.T) {
+		allocated := NewBestEffortPolicy().Allocate(devices, nil, 3)
+		for _, device := range allocated {
+			require.NotNil(t, device, "allocation must not contain padding")
+		}
+		require.ElementsMatch(t, devices[2:], allocated)
+	})
+	t.Run("required device", func(t *testing.T) {
+		allocated := NewBestEffortPolicy().Allocate(devices, devices[2:3], 3)
+		require.ElementsMatch(t, devices[2:], allocated)
+	})
+	t.Run("allocator", func(t *testing.T) {
+		allocator := newAllocatorFrom(devices, NewBestEffortPolicy())
+		allocated := allocator.Allocate(3)
+		require.ElementsMatch(t, devices[2:], allocated)
+		require.ElementsMatch(t, devices[:2], allocator.Allocate(2))
+		require.Empty(t, allocator.Allocate(1))
+		allocator.Free(allocated...)
+		require.ElementsMatch(t, allocated, allocator.Allocate(3))
+	})
 }
